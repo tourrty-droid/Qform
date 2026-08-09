@@ -4,492 +4,470 @@ import time
 import json
 import pickle
 import shutil
-import winreg
+import requests
 from datetime import datetime, timedelta
+from collections import deque
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QLabel,
                              QProgressBar, QLineEdit, QTextEdit, QMessageBox,
                              QDialog, QComboBox, QCheckBox, QDialogButtonBox,
                              QGroupBox, QFormLayout, QListWidget, QListWidgetItem,
-                             QFrame, QStatusBar, QTabWidget, QTableWidget,
-                             QTableWidgetItem, QHeaderView, QSpinBox)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer
-from PyQt6.QtGui import QAction, QFont
+                             QFrame, QStatusBar, QSplitter, QSystemTrayIcon, QMenu,
+                             QSpinBox)
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt6.QtGui import QAction, QPainter, QColor, QPen, QBrush, QKeySequence
 import libtorrent as lt
 
 
-class Installer:
-    @staticmethod
-    def install():
-        app_data = os.path.join(os.environ['APPDATA'], 'Qform')
-        if not os.path.exists(app_data):
-            os.makedirs(app_data)
-
-        dirs = ['torrents', 'resume', 'settings']
-        for d in dirs:
-            dir_path = os.path.join(app_data, d)
-            if not os.path.exists(dir_path):
-                os.makedirs(dir_path)
-
-        if QMessageBox.question(
-                None, 'Qform Setup',
-                'Would you like Qform to start with Windows?',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        ) == QMessageBox.StandardButton.Yes:
-            try:
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run",
-                    0, winreg.KEY_SET_VALUE
-                )
-                winreg.SetValueEx(key, "Qform", 0, winreg.REG_SZ, sys.executable)
-                winreg.CloseKey(key)
-            except:
-                pass
-
-        default_settings = {
-            'theme': 'Dark Gray',
-            'language': 'English',
-            'download_path': os.path.expanduser('~/Downloads'),
-            'confirm_delete': True,
-            'confirm_stop': True,
-            'confirm_exit': True
-        }
-
-        settings_file = os.path.join(app_data, 'settings', 'default.json')
-        with open(settings_file, 'w') as f:
-            json.dump(default_settings, f, indent=4)
-
-        return True
-
-
+# ============== RESUME DATA ==============
 class ResumeData:
     def __init__(self):
-        self.resume_dir = os.path.join(os.environ['APPDATA'], 'Qform', 'resume')
-        if not os.path.exists(self.resume_dir):
-            os.makedirs(self.resume_dir)
+        self.dir = os.path.join(os.environ['APPDATA'], 'Qform', 'resume')
+        os.makedirs(self.dir, exist_ok=True)
 
-    def save(self, torrent_id, data):
-        filepath = os.path.join(self.resume_dir, f"{torrent_id}.resume")
-        try:
-            with open(filepath, 'wb') as f:
-                pickle.dump(data, f)
-        except Exception as e:
-            print(f"Error saving resume data: {e}")
+    def save(self, tid, data):
+        path = os.path.join(self.dir, f"{tid}.resume")
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
 
-    def load(self, torrent_id):
-        filepath = os.path.join(self.resume_dir, f"{torrent_id}.resume")
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'rb') as f:
-                    return pickle.load(f)
-            except:
-                pass
+    def load(self, tid):
+        path = os.path.join(self.dir, f"{tid}.resume")
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return pickle.load(f)
         return None
 
-    def delete(self, torrent_id):
-        filepath = os.path.join(self.resume_dir, f"{torrent_id}.resume")
-        if os.path.exists(filepath):
-            os.remove(filepath)
+    def delete(self, tid):
+        path = os.path.join(self.dir, f"{tid}.resume")
+        if os.path.exists(path):
+            os.remove(path)
 
     def load_all(self):
         resumes = []
-        if os.path.exists(self.resume_dir):
-            for filename in os.listdir(self.resume_dir):
-                if filename.endswith('.resume'):
-                    torrent_id = filename.replace('.resume', '')
-                    data = self.load(torrent_id)
+        if os.path.exists(self.dir):
+            for fn in os.listdir(self.dir):
+                if fn.endswith('.resume'):
+                    tid = fn.replace('.resume', '')
+                    data = self.load(tid)
                     if data:
-                        data['id'] = torrent_id
+                        data['id'] = tid
                         resumes.append(data)
         return resumes
 
 
+# ============== SPEED CHART ==============
+class SpeedChart(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.dl = deque(maxlen=300)
+        self.ul = deque(maxlen=300)
+        for _ in range(300):
+            self.dl.append(0)
+            self.ul.append(0)
+        self.setMinimumHeight(100)
+
+    def add_point(self, d, u):
+        self.dl.append(d)
+        self.ul.append(u)
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor('#1a1a1a'))
+        p.setPen(QPen(QColor('#333'), 0.5))
+        for i in range(4):
+            p.drawLine(0, h * i // 4, w, h * i // 4)
+        mx = max(max(self.dl), max(self.ul), 1)
+        p.setPen(QPen(QColor('#4caf50'), 2))
+        for i in range(1, len(self.dl)):
+            p.drawLine(int((i - 1) * w / 300), int(h - self.dl[i - 1] / mx * (h - 10)),
+                       int(i * w / 300), int(h - self.dl[i] / mx * (h - 10)))
+        p.setPen(QPen(QColor('#2196f3'), 2))
+        for i in range(1, len(self.ul)):
+            p.drawLine(int((i - 1) * w / 300), int(h - self.ul[i - 1] / mx * (h - 10)),
+                       int(i * w / 300), int(h - self.ul[i] / mx * (h - 10)))
+
+
+# ============== TORRENT WIDGET ==============
+class TorrentWidget(QFrame):
+    def __init__(self, tid, name):
+        super().__init__()
+        self.tid = tid
+        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
+        self.setMaximumHeight(140)
+        l = QVBoxLayout(self)
+        l.setSpacing(2)
+        self.name_label = QLabel(name[:55] + "..." if len(name) > 55 else name)
+        self.name_label.setStyleSheet("font-weight:bold;font-size:11px;")
+        l.addWidget(self.name_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
+        l.addWidget(self.progress_bar)
+        r1 = QHBoxLayout()
+        self.status_label = QLabel("...")
+        self.eta_label = QLabel("ETA: --")
+        r1.addWidget(self.status_label)
+        r1.addStretch()
+        r1.addWidget(self.eta_label)
+        l.addLayout(r1)
+        r2 = QHBoxLayout()
+        self.speed_label = QLabel("DL:0 UL:0")
+        self.peers_label = QLabel("P:0 S:0")
+        self.size_label = QLabel("0/0")
+        r2.addWidget(self.speed_label)
+        r2.addWidget(self.peers_label)
+        r2.addWidget(self.size_label)
+        r2.addStretch()
+        l.addLayout(r2)
+        r3 = QHBoxLayout()
+        self.downloaded_label = QLabel("DL:0")
+        self.uploaded_label = QLabel("UL:0")
+        self.time_label = QLabel("00:00")
+        r3.addWidget(self.downloaded_label)
+        r3.addWidget(self.uploaded_label)
+        r3.addStretch()
+        r3.addWidget(self.time_label)
+        l.addLayout(r3)
+
+
+# ============== SETTINGS DIALOG ==============
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        self.p = parent
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(450)
+        self.setMinimumWidth(400)
         self.setModal(True)
+        l = QVBoxLayout(self)
+        l.setSpacing(10)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(15)
+        g1 = QGroupBox("Theme")
+        l1 = QVBoxLayout()
+        self.theme = QComboBox()
+        self.theme.addItems(["Dark Gray", "Dark"])
+        self.theme.currentTextChanged.connect(lambda t: self.p.apply_theme(t) if self.p else None)
+        l1.addWidget(self.theme)
+        g1.setLayout(l1)
+        l.addWidget(g1)
 
-        # Theme
-        theme_group = QGroupBox("Interface Theme")
-        theme_layout = QVBoxLayout()
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Dark Gray", "Dark"])
-        self.theme_combo.currentTextChanged.connect(self.preview_theme)
-        theme_layout.addWidget(self.theme_combo)
-        theme_group.setLayout(theme_layout)
-        layout.addWidget(theme_group)
+        g2 = QGroupBox("Language")
+        l2 = QVBoxLayout()
+        self.lang = QComboBox()
+        self.lang.addItems(["English", "Russian"])
+        l2.addWidget(self.lang)
+        g2.setLayout(l2)
+        l.addWidget(g2)
 
-        # Language
-        lang_group = QGroupBox("Language")
-        lang_layout = QVBoxLayout()
-        self.lang_combo = QComboBox()
-        self.lang_combo.addItems(["English", "Russian"])
-        lang_layout.addWidget(self.lang_combo)
-        lang_group.setLayout(lang_layout)
-        layout.addWidget(lang_group)
+        g4 = QGroupBox("Confirmations")
+        l4 = QVBoxLayout()
+        self.cd = QCheckBox("Confirm delete")
+        self.cs = QCheckBox("Confirm stop")
+        self.ce = QCheckBox("Confirm exit")
+        l4.addWidget(self.cd)
+        l4.addWidget(self.cs)
+        l4.addWidget(self.ce)
+        g4.setLayout(l4)
+        l.addWidget(g4)
 
-        # Download settings
-        dl_group = QGroupBox("Download Settings")
-        dl_layout = QFormLayout()
+        if self.p:
+            self.theme.setCurrentText(self.p.current_theme)
+            self.lang.setCurrentText(self.p.current_language)
+            self.cd.setChecked(self.p.confirm_delete)
+            self.cs.setChecked(self.p.confirm_stop)
+            self.ce.setChecked(self.p.confirm_exit)
 
-        self.max_downloads = QSpinBox()
-        self.max_downloads.setRange(1, 20)
-        self.max_downloads.setValue(5)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.save)
+        bb.rejected.connect(self.reject)
+        l.addWidget(bb)
 
-        self.dl_limit = QSpinBox()
-        self.dl_limit.setRange(0, 1000000)
-        self.dl_limit.setSuffix(" KB/s")
-        self.dl_limit.setSpecialValueText("Unlimited")
-
-        self.ul_limit = QSpinBox()
-        self.ul_limit.setRange(0, 1000000)
-        self.ul_limit.setSuffix(" KB/s")
-        self.ul_limit.setSpecialValueText("Unlimited")
-
-        dl_layout.addRow("Max active downloads:", self.max_downloads)
-        dl_layout.addRow("Download limit:", self.dl_limit)
-        dl_layout.addRow("Upload limit:", self.ul_limit)
-        dl_group.setLayout(dl_layout)
-        layout.addWidget(dl_group)
-
-        # Confirmations
-        confirm_group = QGroupBox("Confirmation Dialogs")
-        confirm_layout = QVBoxLayout()
-
-        self.confirm_delete = QCheckBox("Show confirmation before deleting torrent")
-        self.confirm_stop = QCheckBox("Show confirmation before stopping download")
-        self.confirm_exit = QCheckBox("Show confirmation before exiting application")
-
-        confirm_layout.addWidget(self.confirm_delete)
-        confirm_layout.addWidget(self.confirm_stop)
-        confirm_layout.addWidget(self.confirm_exit)
-        confirm_group.setLayout(confirm_layout)
-        layout.addWidget(confirm_group)
-
-        self.load_current_settings()
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.save_and_apply)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def load_current_settings(self):
-        if self.parent:
-            self.theme_combo.setCurrentText(self.parent.current_theme)
-            self.lang_combo.setCurrentText(self.parent.current_language)
-            self.confirm_delete.setChecked(self.parent.confirm_delete)
-            self.confirm_stop.setChecked(self.parent.confirm_stop)
-            self.confirm_exit.setChecked(self.parent.confirm_exit)
-
-    def preview_theme(self, theme_name):
-        if self.parent:
-            self.parent.apply_theme(theme_name)
-
-    def save_and_apply(self):
-        if self.parent:
-            self.parent.current_theme = self.theme_combo.currentText()
-            self.parent.current_language = self.lang_combo.currentText()
-            self.parent.confirm_delete = self.confirm_delete.isChecked()
-            self.parent.confirm_stop = self.confirm_stop.isChecked()
-            self.parent.confirm_exit = self.confirm_exit.isChecked()
-
-            self.parent.apply_language(self.lang_combo.currentText())
-            self.parent.apply_theme(self.theme_combo.currentText())
-            self.parent.save_settings()
-
+    def save(self):
+        if self.p:
+            self.p.current_theme = self.theme.currentText()
+            self.p.current_language = self.lang.currentText()
+            self.p.confirm_delete = self.cd.isChecked()
+            self.p.confirm_stop = self.cs.isChecked()
+            self.p.confirm_exit = self.ce.isChecked()
+            self.p.apply_language(self.lang.currentText())
+            self.p.apply_theme(self.theme.currentText())
+            self.p.save_settings()
         self.accept()
 
 
+# ============== DEVICE MANAGER ==============
 class DeviceManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Device Manager")
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(500, 350)
+        l = QVBoxLayout(self)
+        l.addWidget(QLabel("Connected Devices"))
+        self.devices = QListWidget()
+        self.detect()
+        l.addWidget(self.devices)
+        btn = QPushButton("Transfer Files")
+        btn.clicked.connect(self.transfer)
+        l.addWidget(btn)
 
-        layout = QVBoxLayout(self)
+    def detect(self):
+        self.devices.clear()
+        for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+            if os.path.exists(f"{letter}:\\"):
+                self.devices.addItem(f"Drive: {letter}:\\")
 
-        title = QLabel("Connected Devices")
-        title.setStyleSheet("font-size: 14px; font-weight: bold;")
-        layout.addWidget(title)
-
-        self.device_list = QListWidget()
-        self.detect_devices()
-        layout.addWidget(self.device_list)
-
-        options_group = QGroupBox("Transfer Options")
-        options_layout = QVBoxLayout()
-
-        self.convert_video = QCheckBox("Convert video for device compatibility")
-        self.convert_audio = QCheckBox("Convert audio for device compatibility")
-        self.delete_after = QCheckBox("Delete from computer after transfer")
-
-        options_layout.addWidget(self.convert_video)
-        options_layout.addWidget(self.convert_audio)
-        options_layout.addWidget(self.delete_after)
-
-        options_group.setLayout(options_layout)
-        layout.addWidget(options_group)
-
-        self.transfer_btn = QPushButton("Transfer Selected Files to Device")
-        self.transfer_btn.clicked.connect(self.transfer_files)
-        layout.addWidget(self.transfer_btn)
-
-    def detect_devices(self):
-        self.device_list.clear()
-
-        if sys.platform == "win32":
-            try:
-                import win32api
-                drives = win32api.GetLogicalDriveStrings()
-                drives = drives.split('\000')[:-1]
-
-                for drive in drives:
-                    if drive != "C:\\":
-                        try:
-                            drive_type = win32api.GetDriveType(drive)
-                            if drive_type == 2:
-                                self.device_list.addItem(f"Removable Drive: {drive}")
-                            elif drive_type == 3:
-                                self.device_list.addItem(f"External Drive: {drive}")
-                        except:
-                            self.device_list.addItem(f"Drive: {drive}")
-            except:
-                for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
-                    drive = f"{letter}:\\"
-                    if os.path.exists(drive):
-                        self.device_list.addItem(f"Drive: {drive}")
-        else:
-            media_paths = ["/media", "/mnt", "/Volumes"]
-            for path in media_paths:
-                if os.path.exists(path):
-                    for device in os.listdir(path):
-                        device_path = os.path.join(path, device)
-                        if os.path.ismount(device_path):
-                            self.device_list.addItem(f"Device: {device} ({device_path})")
-
-    def transfer_files(self):
-        if not self.device_list.selectedItems():
-            QMessageBox.warning(self, "Error", "Please select a device first!")
+    def transfer(self):
+        if not self.devices.selectedItems():
+            QMessageBox.warning(self, "Error", "Select device")
             return
-
-        source_files, _ = QFileDialog.getOpenFileNames(self, "Select Files to Transfer")
-        if source_files:
-            selected = self.device_list.selectedItems()[0].text()
-            device_path = selected.split(": ")[1] if ": " in selected else selected
-
+        files, _ = QFileDialog.getOpenFileNames(self, "Select files")
+        if files:
+            dest = self.devices.selectedItems()[0].text().split(": ")[1] if ": " in self.devices.selectedItems()[
+                0].text() else self.devices.selectedItems()[0].text()
             try:
-                for file_path in source_files:
-                    dest = os.path.join(device_path, os.path.basename(file_path))
-                    shutil.copy2(file_path, dest)
-
-                QMessageBox.information(
-                    self, "Success",
-                    f"Successfully transferred {len(source_files)} files!"
-                )
+                for f in files:
+                    shutil.copy2(f, os.path.join(dest, os.path.basename(f)))
+                QMessageBox.information(self, "Done", f"Transferred {len(files)} files")
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Transfer failed: {str(e)}")
+                QMessageBox.critical(self, "Error", str(e))
 
 
+# ============== TRACKER DIALOG ==============
+class TrackerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Trackers")
+        self.setMinimumSize(550, 450)
+        l = QVBoxLayout(self)
+        g = QGroupBox("Options")
+        gl = QVBoxLayout()
+        self.auto_add = QCheckBox("Add trackers to torrent automatically")
+        self.auto_add.setChecked(True)
+        gl.addWidget(self.auto_add)
+        self.auto_upd = QCheckBox("Update trackers list everyday")
+        self.auto_upd.toggled.connect(lambda c: [self.url.setEnabled(c), self.upd_btn.setEnabled(c)])
+        gl.addWidget(self.auto_upd)
+        self.url = QLineEdit()
+        self.url.setPlaceholderText("https://cf.trackerslist.com/best.txt")
+        self.url.setEnabled(False)
+        self.upd_btn = QPushButton("Update Now")
+        self.upd_btn.setEnabled(False)
+        self.upd_btn.clicked.connect(self.update_list)
+        hl = QHBoxLayout()
+        hl.addWidget(self.url)
+        hl.addWidget(self.upd_btn)
+        gl.addLayout(hl)
+        g.setLayout(gl)
+        l.addWidget(g)
+        l.addWidget(QLabel("Tracker List:"))
+        self.list = QTextEdit()
+        self.load_trackers()
+        l.addWidget(self.list)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.save)
+        bb.rejected.connect(self.reject)
+        l.addWidget(bb)
+
+    def load_trackers(self):
+        p = os.path.join(os.environ['APPDATA'], 'Qform', 'trackers', 'list.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                self.list.setText('\n'.join(json.load(f)))
+
+    def update_list(self):
+        try:
+            r = requests.get(self.url.text().strip(), timeout=10)
+            if r.status_code == 200:
+                trackers = [l.strip() for l in r.text.split('\n') if l.strip() and not l.startswith('#')]
+                self.list.setText('\n'.join(trackers))
+                QMessageBox.information(self, "Done", f"Loaded {len(trackers)} trackers")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
+
+    def save(self):
+        trackers = [t.strip() for t in self.list.toPlainText().split('\n') if t.strip()]
+        p = os.path.join(os.environ['APPDATA'], 'Qform', 'trackers', 'list.json')
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w') as f:
+            json.dump(trackers, f, indent=4)
+        self.accept()
+
+
+# ============== TORRENT SESSION ==============
 class TorrentSession(QThread):
     progress_update = pyqtSignal(str, dict)
     torrent_added = pyqtSignal(str, str)
+    download_complete = pyqtSignal(str, str)
 
     def __init__(self):
         super().__init__()
         self.session = None
         self.torrents = {}
         self.is_running = True
-        self.resume_data = ResumeData()
+        self.resume = ResumeData()
 
     def run(self):
-        settings = {
+        self.session = lt.session({
             'listen_interfaces': '0.0.0.0:6881',
             'enable_dht': True,
             'enable_lsd': True,
             'enable_upnp': True,
-            'enable_natpmp': True,
-        }
-
-        self.session = lt.session(settings)
-        self.load_saved_torrents()
+            'enable_natpmp': True
+        })
+        self.load_saved()
 
         while self.is_running:
             try:
                 if self.session:
                     self.session.post_torrent_updates()
 
-                    for torrent_id, data in list(self.torrents.items()):
+                    for tid, data in list(self.torrents.items()):
                         if data['handle'].is_valid():
-                            status = data['handle'].status()
+                            s = data['handle'].status()
 
-                            # Calculate ETA
-                            if status.download_rate > 0 and status.total_wanted > 0:
-                                remaining = status.total_wanted - status.total_wanted_done
-                                eta_seconds = remaining / status.download_rate
+                            if s.download_rate > 0 and s.total_wanted > 0:
+                                remaining = s.total_wanted - s.total_wanted_done
+                                eta_seconds = remaining / s.download_rate
                                 eta = str(timedelta(seconds=int(eta_seconds)))
                             else:
-                                eta = "∞"
+                                eta = "inf"
 
-                            # Calculate elapsed time
-                            elapsed = str(timedelta(seconds=status.active_time))
+                            elapsed = str(timedelta(seconds=s.active_time))
+                            state_int = int(s.state)
+                            sm = {0: "Queued", 1: "Checking", 2: "Metadata", 3: "Downloading",
+                                  4: "Finished", 5: "Seeding", 6: "Allocating", 7: "Resume check"}
+                            st = sm.get(state_int, f"State {state_int}")
 
-                            # Determine status text using integer values
-                            state_int = int(status.state)
-
-                            # libtorrent state values (correct for newer versions)
-                            state_map = {
-                                0: "Queued",
-                                1: "Checking Files",
-                                2: "Downloading Metadata",
-                                3: "Downloading",
-                                4: "Finished",
-                                5: "Seeding",
-                                6: "Allocating",
-                                7: "Checking Resume Data"
-                            }
-
-                            state_text = state_map.get(state_int, f"State {state_int}")
-
-                            # Override for paused
-                            if status.paused:
-                                if state_int in [3, 5]:
-                                    state_text = "Paused"
+                            if data.get('user_paused', False):
+                                st = "Paused"
 
                             info = {
-                                'progress': status.progress * 100,
-                                'download_rate': status.download_rate / 1024,
-                                'upload_rate': status.upload_rate / 1024,
-                                'peers': status.num_peers,
-                                'seeds': status.num_seeds,
-                                'state': state_text,
-                                'total_size': status.total_wanted,
-                                'total_done': status.total_done,
-                                'total_uploaded': status.total_upload,
-                                'is_seeding': status.is_seeding,
+                                'progress': s.progress * 100,
+                                'download_rate': s.download_rate / 1024,
+                                'upload_rate': s.upload_rate / 1024,
+                                'peers': s.num_peers,
+                                'seeds': s.num_seeds,
+                                'state': st,
+                                'total_size': s.total_wanted,
+                                'total_done': s.total_done,
+                                'total_uploaded': s.total_upload,
                                 'name': data['name'],
                                 'eta': eta,
                                 'elapsed': elapsed,
-                                'remaining_bytes': status.total_wanted - status.total_wanted_done,
-                                'paused': status.paused
+                                'paused': data.get('user_paused', False)
                             }
+                            self.progress_update.emit(tid, info)
 
-                            self.progress_update.emit(torrent_id, info)
+                            if s.is_seeding and not data.get('completed'):
+                                self.torrents[tid]['completed'] = True
+                                self.download_complete.emit(tid, data['name'])
 
                 time.sleep(1)
-
             except Exception as e:
                 print(f"Session error: {e}")
 
-    def add_torrent(self, torrent_id, source, save_path):
+    def add_torrent(self, tid, source, save_path):
         try:
             params = {
                 'save_path': save_path,
-                'storage_mode': lt.storage_mode_t.storage_mode_sparse,
+                'storage_mode': lt.storage_mode_t.storage_mode_sparse
             }
 
-            resume = self.resume_data.load(torrent_id)
+            resume_data = self.resume.load(tid)
 
             if source.startswith('magnet:'):
-                handle = lt.add_magnet_uri(self.session, source, params)
-
+                h = lt.add_magnet_uri(self.session, source, params)
                 timeout = 0
-                while not handle.has_metadata():
+                while not h.has_metadata():
                     time.sleep(1)
                     timeout += 1
                     if timeout > 120:
-                        raise Exception("Metadata download timeout")
+                        raise Exception("Metadata timeout")
             else:
                 info = lt.torrent_info(source)
-                handle = self.session.add_torrent({'ti': info, 'save_path': save_path})
+                h = self.session.add_torrent({'ti': info, 'save_path': save_path})
 
-            name = handle.status().name or os.path.basename(source)
+            if resume_data and 'resume_bytes' in resume_data:
+                try:
+                    h.apply_resume_data(resume_data['resume_bytes'])
+                except:
+                    pass
 
-            self.torrents[torrent_id] = {
-                'handle': handle,
+            name = h.status().name or os.path.basename(source)
+            self.torrents[tid] = {
+                'handle': h,
                 'source': source,
                 'save_path': save_path,
                 'name': name,
                 'added_date': datetime.now().isoformat(),
-                'completed': False
+                'completed': False,
+                'user_paused': False
             }
-
-            self.torrent_added.emit(torrent_id, name)
-
-            if resume and 'resume_data' in resume:
-                try:
-                    handle.apply_resume_data(resume['resume_data'])
-                except:
-                    pass
-
-            self.save_progress(torrent_id)
+            self.torrent_added.emit(tid, name)
+            self.save_progress(tid)
             return True
-
         except Exception as e:
-            print(f"Error adding torrent: {e}")
+            print(f"Add error: {e}")
             return False
 
-    def remove_torrent(self, torrent_id, delete_files=False):
-        if torrent_id in self.torrents:
-            try:
-                if delete_files and self.torrents[torrent_id]['handle'].is_valid():
-                    try:
-                        info = self.torrents[torrent_id]['handle'].torrent_file()
-                        if info:
-                            save_path = self.torrents[torrent_id]['save_path']
-                            for f in info.files():
-                                file_path = os.path.join(save_path, f.path)
-                                if os.path.exists(file_path):
-                                    os.remove(file_path)
-                    except:
-                        pass
-
-                self.session.remove_torrent(self.torrents[torrent_id]['handle'])
-                self.resume_data.delete(torrent_id)
-                del self.torrents[torrent_id]
-                return True
-            except Exception as e:
-                print(f"Error removing torrent: {e}")
-        return False
-
-    def save_progress(self, torrent_id):
-        if torrent_id in self.torrents:
-            data = self.torrents[torrent_id]
-            if data['handle'].is_valid():
+    def remove_torrent(self, tid, delete_files=False):
+        if tid in self.torrents:
+            if delete_files:
                 try:
-                    resume = {
-                        'source': data['source'],
-                        'save_path': data['save_path'],
-                        'name': data['name'],
-                        'added_date': data['added_date'],
-                        'resume_data': data['handle'].save_resume_data()
-                    }
-                    self.resume_data.save(torrent_id, resume)
+                    h = self.torrents[tid]['handle']
+                    if h.is_valid():
+                        info = h.torrent_file()
+                        if info:
+                            for f in info.files():
+                                fp = os.path.join(self.torrents[tid]['save_path'], f.path)
+                                if os.path.exists(fp):
+                                    os.remove(fp)
+                except:
+                    pass
+            self.session.remove_torrent(self.torrents[tid]['handle'])
+            self.resume.delete(tid)
+            del self.torrents[tid]
+
+    def pause_torrent(self, tid):
+        if tid in self.torrents:
+            h = self.torrents[tid]['handle']
+            h.auto_managed(False)
+            h.pause()
+            self.torrents[tid]['user_paused'] = True
+            self.save_progress(tid)
+
+    def resume_torrent(self, tid):
+        if tid in self.torrents:
+            h = self.torrents[tid]['handle']
+            h.auto_managed(True)
+            h.resume()
+            self.torrents[tid]['user_paused'] = False
+
+    def save_progress(self, tid):
+        if tid in self.torrents:
+            d = self.torrents[tid]
+            if d['handle'].is_valid():
+                try:
+                    self.resume.save(tid, {
+                        'source': d['source'],
+                        'save_path': d['save_path'],
+                        'name': d['name'],
+                        'added_date': d['added_date'],
+                        'resume_bytes': d['handle'].save_resume_data()
+                    })
                 except:
                     pass
 
     def save_all_progress(self):
-        for torrent_id in self.torrents:
-            self.save_progress(torrent_id)
+        for tid in self.torrents:
+            self.save_progress(tid)
 
-    def load_saved_torrents(self):
-        saved = self.resume_data.load_all()
-        for data in saved:
-            if data and 'source' in data and 'save_path' in data:
-                self.add_torrent(
-                    data['id'],
-                    data['source'],
-                    data['save_path']
-                )
+    def load_saved(self):
+        for d in self.resume.load_all():
+            if d and 'source' in d and 'save_path' in d:
+                self.add_torrent(d['id'], d['source'], d['save_path'])
 
     def stop(self):
         self.is_running = False
@@ -498,69 +476,12 @@ class TorrentSession(QThread):
             self.session.pause()
 
 
-class TorrentWidget(QFrame):
-    def __init__(self, torrent_id, name):
-        super().__init__()
-        self.torrent_id = torrent_id
-        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
-        self.setMaximumHeight(150)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(3)
-
-        # Name
-        self.name_label = QLabel(name[:55] + "..." if len(name) > 55 else name)
-        self.name_label.setStyleSheet("font-weight: bold; font-size: 11px;")
-        layout.addWidget(self.name_label)
-
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("%p%")
-        layout.addWidget(self.progress_bar)
-
-        # Status row
-        status_row = QHBoxLayout()
-        self.status_label = QLabel("Initializing...")
-        self.status_label.setStyleSheet("font-weight: bold; color: #4caf50;")
-        self.eta_label = QLabel("ETA: --")
-        status_row.addWidget(self.status_label)
-        status_row.addStretch()
-        status_row.addWidget(self.eta_label)
-        layout.addLayout(status_row)
-
-        # Stats row
-        stats_row = QHBoxLayout()
-        self.speed_label = QLabel("↓ 0 KB/s ↑ 0 KB/s")
-        self.peers_label = QLabel("P: 0 S: 0")
-        self.size_label = QLabel("0 B / 0 B")
-
-        stats_row.addWidget(self.speed_label)
-        stats_row.addWidget(self.peers_label)
-        stats_row.addWidget(self.size_label)
-        stats_row.addStretch()
-        layout.addLayout(stats_row)
-
-        # Time row
-        time_row = QHBoxLayout()
-        self.downloaded_label = QLabel("Downloaded: 0 B")
-        self.uploaded_label = QLabel("Uploaded: 0 B")
-        self.time_label = QLabel("Time: 00:00:00")
-
-        time_row.addWidget(self.downloaded_label)
-        time_row.addWidget(self.uploaded_label)
-        time_row.addStretch()
-        time_row.addWidget(self.time_label)
-        layout.addLayout(time_row)
-
-
+# ============== MAIN WINDOW ==============
 class QformMain(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.resume_data = ResumeData()
         self.torrent_widgets = {}
         self.active_torrents = []
-
         self.current_theme = "Dark Gray"
         self.current_language = "English"
         self.confirm_delete = True
@@ -568,6 +489,7 @@ class QformMain(QMainWindow):
         self.confirm_exit = True
 
         self.load_settings()
+        self.setup_tray()
         self.initUI()
         self.create_menu()
         self.create_statusbar()
@@ -577,487 +499,403 @@ class QformMain(QMainWindow):
         self.torrent_session = TorrentSession()
         self.torrent_session.progress_update.connect(self.update_torrent_info)
         self.torrent_session.torrent_added.connect(self.on_torrent_added)
+        self.torrent_session.download_complete.connect(self.on_download_complete)
         self.torrent_session.start()
+
+        self.chart_timer = QTimer()
+        self.chart_timer.timeout.connect(self.update_chart)
+        self.chart_timer.start(1000)
+
+        self.save_timer = QTimer()
+        self.save_timer.timeout.connect(self.auto_save)
+        self.save_timer.start(5000)
+
+    def auto_save(self):
+        if self.torrent_session:
+            self.torrent_session.save_all_progress()
+
+    def setup_tray(self):
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setToolTip("Qform")
+        m = QMenu()
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self.show)
+        m.addAction(show_action)
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        m.addAction(exit_action)
+        self.tray.setContextMenu(m)
+        self.tray.show()
 
     def initUI(self):
         self.setWindowTitle("Qform")
-        self.setMinimumSize(850, 650)
+        self.setMinimumSize(900, 650)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setSpacing(8)
-        layout.setContentsMargins(10, 10, 10, 10)
+        c = QWidget()
+        self.setCentralWidget(c)
+        l = QVBoxLayout(c)
+        l.setSpacing(8)
+        l.setContentsMargins(10, 10, 10, 10)
 
-        # Add torrent section
-        add_group = QGroupBox("Add Torrent")
-        add_layout = QVBoxLayout()
-
-        source_layout = QHBoxLayout()
-        self.source_input = QLineEdit()
-        self.source_input.setPlaceholderText("magnet:?xt=urn:btih:... or path to .torrent")
-        browse_btn = QPushButton("Browse")
-        browse_btn.clicked.connect(self.browse_torrent)
-        source_layout.addWidget(self.source_input)
-        source_layout.addWidget(browse_btn)
-        add_layout.addLayout(source_layout)
-
-        path_layout = QHBoxLayout()
-        self.path_input = QLineEdit(os.path.expanduser("~/Downloads"))
-        path_btn = QPushButton("Browse")
-        path_btn.clicked.connect(self.browse_path)
-        path_layout.addWidget(self.path_input)
-        path_layout.addWidget(path_btn)
-        add_layout.addLayout(path_layout)
-
+        ag = QGroupBox("Add Torrent")
+        al = QVBoxLayout()
+        sl = QHBoxLayout()
+        self.src = QLineEdit()
+        self.src.setPlaceholderText("magnet link or .torrent path")
+        browse_t_btn = QPushButton("Browse")
+        browse_t_btn.clicked.connect(self.browse_torrent)
+        sl.addWidget(self.src)
+        sl.addWidget(browse_t_btn)
+        al.addLayout(sl)
+        pl = QHBoxLayout()
+        self.path = QLineEdit(os.path.expanduser("~/Downloads"))
+        browse_p_btn = QPushButton("Browse")
+        browse_p_btn.clicked.connect(self.browse_path)
+        pl.addWidget(self.path)
+        pl.addWidget(browse_p_btn)
+        al.addLayout(pl)
         add_btn = QPushButton("Add Torrent")
         add_btn.clicked.connect(self.add_torrent)
-        add_layout.addWidget(add_btn)
+        al.addWidget(add_btn)
+        ag.setLayout(al)
+        l.addWidget(ag)
 
-        add_group.setLayout(add_layout)
-        layout.addWidget(add_group)
+        sp = QSplitter(Qt.Orientation.Vertical)
+        tg = QGroupBox("Torrents")
+        tl = QVBoxLayout()
+        self.tlist = QListWidget()
+        self.tlist.setMinimumHeight(200)
+        tl.addWidget(self.tlist)
+        cl = QHBoxLayout()
+        self.rbtn = QPushButton("Resume")
+        self.rbtn.clicked.connect(self.resume_selected)
+        self.pbtn = QPushButton("Pause")
+        self.pbtn.clicked.connect(self.pause_selected)
+        self.dbtn = QPushButton("Remove")
+        self.dbtn.clicked.connect(self.remove_selected)
+        cl.addWidget(self.rbtn)
+        cl.addWidget(self.pbtn)
+        cl.addWidget(self.dbtn)
+        cl.addStretch()
+        tl.addLayout(cl)
+        tg.setLayout(tl)
+        sp.addWidget(tg)
+        self.chart = SpeedChart()
+        sp.addWidget(self.chart)
+        l.addWidget(sp)
 
-        # Torrents list
-        torrents_group = QGroupBox("Torrents")
-        torrents_layout = QVBoxLayout()
-
-        self.torrent_list = QListWidget()
-        self.torrent_list.setMinimumHeight(300)
-        torrents_layout.addWidget(self.torrent_list)
-
-        controls = QHBoxLayout()
-        self.resume_btn = QPushButton("Resume")
-        self.resume_btn.clicked.connect(self.resume_selected)
-        self.pause_btn = QPushButton("Pause")
-        self.pause_btn.clicked.connect(self.pause_selected)
-        self.remove_btn = QPushButton("Remove")
-        self.remove_btn.clicked.connect(self.remove_selected)
-
-        controls.addWidget(self.resume_btn)
-        controls.addWidget(self.pause_btn)
-        controls.addWidget(self.remove_btn)
-        controls.addStretch()
-        torrents_layout.addLayout(controls)
-
-        torrents_group.setLayout(torrents_layout)
-        layout.addWidget(torrents_group)
-
-        # Global stats
-        self.global_speed = QLabel("Total: ↓ 0 KB/s ↑ 0 KB/s | Active: 0 | Peers: 0")
-        layout.addWidget(self.global_speed)
+        self.gspeed = QLabel("Total: DL 0 KB/s UL 0 KB/s | Active: 0 | Peers: 0")
+        l.addWidget(self.gspeed)
 
     def create_menu(self):
-        menubar = self.menuBar()
-        menubar.setNativeMenuBar(False)
+        mb = self.menuBar()
+        mb.setNativeMenuBar(False)
 
-        # File menu
-        file_menu = menubar.addMenu('File')
+        f = mb.addMenu('File')
 
-        add_action = QAction('Add Torrent...', self)
-        add_action.setShortcut('Ctrl+O')
-        add_action.triggered.connect(self.browse_torrent)
-        file_menu.addAction(add_action)
+        add_t = QAction('Add Torrent...', self)
+        add_t.setShortcut(QKeySequence('Ctrl+O'))
+        add_t.triggered.connect(self.browse_torrent)
+        f.addAction(add_t)
 
-        add_magnet = QAction('Add Magnet Link...', self)
-        add_magnet.setShortcut('Ctrl+M')
-        add_magnet.triggered.connect(lambda: self.source_input.setFocus())
-        file_menu.addAction(add_magnet)
+        add_m = QAction('Add Magnet...', self)
+        add_m.setShortcut(QKeySequence('Ctrl+M'))
+        add_m.triggered.connect(lambda: self.src.setFocus())
+        f.addAction(add_m)
 
-        file_menu.addSeparator()
+        f.addSeparator()
 
-        remove_action = QAction('Remove Torrent', self)
-        remove_action.setShortcut('Delete')
-        remove_action.triggered.connect(self.remove_selected)
-        file_menu.addAction(remove_action)
+        rem = QAction('Remove', self)
+        rem.setShortcut(QKeySequence('Delete'))
+        rem.triggered.connect(self.remove_selected)
+        f.addAction(rem)
 
-        file_menu.addSeparator()
+        f.addSeparator()
 
-        exit_action = QAction('Exit', self)
-        exit_action.setShortcut('Alt+F4')
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        ex = QAction('Exit', self)
+        ex.setShortcut(QKeySequence('Alt+F4'))
+        ex.triggered.connect(self.close)
+        f.addAction(ex)
 
-        # Tools menu
-        tools_menu = menubar.addMenu('Tools')
+        t = mb.addMenu('Tools')
 
-        resume_all = QAction('Resume All', self)
-        resume_all.triggered.connect(self.resume_all)
-        tools_menu.addAction(resume_all)
+        tm = t.addMenu('Task')
 
-        pause_all = QAction('Pause All', self)
-        pause_all.triggered.connect(self.pause_all)
-        tools_menu.addAction(pause_all)
+        qf = QAction('Qform Files', self)
+        qf.triggered.connect(lambda: os.startfile(os.path.join(os.environ['APPDATA'], 'Qform')))
+        tm.addAction(qf)
 
-        tools_menu.addSeparator()
+        tr = QAction('Trackers...', self)
+        tr.triggered.connect(lambda: TrackerDialog(self).exec())
+        tm.addAction(tr)
 
-        device_manager = QAction('Device Manager...', self)
-        device_manager.triggered.connect(self.show_device_manager)
-        tools_menu.addAction(device_manager)
+        tm.addSeparator()
 
-        tools_menu.addSeparator()
+        dm = QAction('Device Manager...', self)
+        dm.triggered.connect(lambda: DeviceManagerDialog(self).exec())
+        t.addAction(dm)
 
-        settings_action = QAction('Preferences...', self)
-        settings_action.setShortcut('Ctrl+P')
-        settings_action.triggered.connect(self.show_settings)
-        tools_menu.addAction(settings_action)
+        t.addSeparator()
 
-        # Help menu
-        help_menu = menubar.addMenu('Help')
+        pr = QAction('Preferences...', self)
+        pr.setShortcut(QKeySequence('Ctrl+P'))
+        pr.triggered.connect(lambda: SettingsDialog(self).exec())
+        t.addAction(pr)
 
-        about_action = QAction('About Qform', self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        h = mb.addMenu('Help')
+
+        ab = QAction('About', self)
+        ab.triggered.connect(
+            lambda: QMessageBox.about(self, "Qform", "Qform v1.2\n\nTorrent Client\nPython + libtorrent + PyQt6"))
+        h.addAction(ab)
 
     def create_statusbar(self):
-        self.statusbar = QStatusBar()
-        self.setStatusBar(self.statusbar)
-        version_label = QLabel("Qform v1.0b")
-        self.statusbar.addPermanentWidget(version_label)
-        self.statusbar.showMessage("Ready")
+        self.sb = QStatusBar()
+        self.setStatusBar(self.sb)
+        self.sb.addPermanentWidget(QLabel("Qform v1.2"))
+        self.sb.showMessage("Ready")
 
     def browse_torrent(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Torrent", "", "Torrent Files (*.torrent)"
-        )
-        if file_path:
-            self.source_input.setText(file_path)
+        f, _ = QFileDialog.getOpenFileName(self, "Select Torrent", "", "Torrent Files (*.torrent)")
+        if f:
+            self.src.setText(f)
 
     def browse_path(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Download Folder")
-        if folder:
-            self.path_input.setText(folder)
+        d = QFileDialog.getExistingDirectory(self, "Select folder")
+        if d:
+            self.path.setText(d)
 
     def add_torrent(self):
-        source = self.source_input.text().strip()
-        save_path = self.path_input.text().strip()
-
-        if not source or not save_path:
-            QMessageBox.warning(self, "Error", "Please provide source and save path")
+        s, p = self.src.text().strip(), self.path.text().strip()
+        if not s or not p:
+            QMessageBox.warning(self, "Error", "Provide source and path")
             return
+        tid = str(int(time.time() * 1000))
+        if self.torrent_session.add_torrent(tid, s, p):
+            self.src.clear()
+            self.sb.showMessage("Torrent added", 3000)
 
-        torrent_id = str(int(time.time() * 1000))
-
-        if self.torrent_session.add_torrent(torrent_id, source, save_path):
-            self.source_input.clear()
-            self.statusbar.showMessage("Torrent added successfully", 3000)
-
-    def on_torrent_added(self, torrent_id, name):
+    def on_torrent_added(self, tid, name):
         item = QListWidgetItem()
-        widget = TorrentWidget(torrent_id, name)
-        item.setSizeHint(widget.sizeHint())
-        self.torrent_list.addItem(item)
-        self.torrent_list.setItemWidget(item, widget)
-        self.torrent_widgets[torrent_id] = widget
+        w = TorrentWidget(tid, name)
+        item.setSizeHint(w.sizeHint())
+        self.tlist.addItem(item)
+        self.tlist.setItemWidget(item, w)
+        self.torrent_widgets[tid] = w
+        self.active_torrents.append({'id': tid, 'name': name, 'item': item})
 
-        self.active_torrents.append({
-            'id': torrent_id,
-            'name': name,
-            'item': item
-        })
+    def on_download_complete(self, tid, name):
+        self.tray.showMessage("Download Complete", f"{name} finished", QSystemTrayIcon.MessageIcon.Information, 5000)
 
-    def update_torrent_info(self, torrent_id, info):
-        if torrent_id in self.torrent_widgets:
-            w = self.torrent_widgets[torrent_id]
+    def update_torrent_info(self, tid, info):
+        if tid in self.torrent_widgets:
+            w = self.torrent_widgets[tid]
             w.progress_bar.setValue(int(info['progress']))
             w.status_label.setText(info['state'])
             w.eta_label.setText(f"ETA: {info['eta']}")
-            w.speed_label.setText(f"↓ {info['download_rate']:.1f} KB/s ↑ {info['upload_rate']:.1f} KB/s")
-            w.peers_label.setText(f"P: {info['peers']} S: {info['seeds']}")
+            w.speed_label.setText(f"DL:{info['download_rate']:.1f} UL:{info['upload_rate']:.1f}")
+            w.peers_label.setText(f"P:{info['peers']} S:{info['seeds']}")
             w.time_label.setText(f"Time: {info['elapsed']}")
 
-            def format_bytes(b):
-                for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            def fb(b):
+                for u in ['B', 'KB', 'MB', 'GB']:
                     if b < 1024:
-                        return f"{b:.1f} {unit}"
+                        return f"{b:.1f}{u}"
                     b /= 1024
-                return f"{b:.1f} PB"
+                return f"{b:.1f}TB"
 
-            w.size_label.setText(f"{format_bytes(info['total_done'])} / {format_bytes(info['total_size'])}")
-            w.downloaded_label.setText(f"Downloaded: {format_bytes(info['total_done'])}")
-            w.uploaded_label.setText(f"Uploaded: {format_bytes(info['total_uploaded'])}")
+            w.size_label.setText(f"{fb(info['total_done'])}/{fb(info['total_size'])}")
+            w.downloaded_label.setText(f"DL:{fb(info['total_done'])}")
+            w.uploaded_label.setText(f"UL:{fb(info['total_uploaded'])}")
 
-            # Color status based on state
-            state_colors = {
+            colors = {
                 "Downloading": "#4caf50",
                 "Seeding": "#2196f3",
                 "Finished": "#ff9800",
                 "Paused": "#9e9e9e",
-                "Checking Files": "#ffeb3b",
-                "Downloading Metadata": "#9c27b0",
-                "Allocating": "#00bcd4",
-                "Checking Resume Data": "#ff5722"
+                "Checking": "#ffeb3b"
             }
+            w.status_label.setStyleSheet(f"font-weight:bold;color:{colors.get(info['state'], '#e0e0e0')}")
 
-            color = state_colors.get(info['state'], "#e0e0e0")
-            w.status_label.setStyleSheet(f"font-weight: bold; color: {color};")
+        ts = self.torrent_session
+        tdl = sum(ts.torrents[t]['handle'].status().download_rate / 1024 for t in ts.torrents) if ts else 0
+        tul = sum(ts.torrents[t]['handle'].status().upload_rate / 1024 for t in ts.torrents) if ts else 0
+        tp = sum(ts.torrents[t]['handle'].status().num_peers for t in ts.torrents) if ts else 0
+        self.gspeed.setText(
+            f"Total: DL {tdl:.1f} KB/s UL {tul:.1f} KB/s | Active: {len(self.torrent_widgets)} | Peers: {tp}")
 
-        # Update global stats
-        total_dl = sum(
-            self.torrent_session.torrents[tid]['handle'].status().download_rate / 1024
-            for tid in self.torrent_session.torrents
-        ) if self.torrent_session else 0
-
-        total_ul = sum(
-            self.torrent_session.torrents[tid]['handle'].status().upload_rate / 1024
-            for tid in self.torrent_session.torrents
-        ) if self.torrent_session else 0
-
-        total_peers = sum(
-            self.torrent_session.torrents[tid]['handle'].status().num_peers
-            for tid in self.torrent_session.torrents
-        ) if self.torrent_session else 0
-
-        self.global_speed.setText(
-            f"Total: ↓ {total_dl:.1f} KB/s ↑ {total_ul:.1f} KB/s | "
-            f"Active: {len(self.torrent_widgets)} | Peers: {total_peers}"
-        )
-
-    def resume_selected(self):
-        current = self.torrent_list.currentItem()
-        if current:
-            row = self.torrent_list.row(current)
-            if row < len(self.active_torrents):
-                tid = self.active_torrents[row]['id']
-                if tid in self.torrent_session.torrents:
-                    self.torrent_session.torrents[tid]['handle'].resume()
+    def update_chart(self):
+        if self.torrent_session:
+            dl = sum(self.torrent_session.torrents[t]['handle'].status().download_rate / 1024 for t in
+                     self.torrent_session.torrents)
+            ul = sum(self.torrent_session.torrents[t]['handle'].status().upload_rate / 1024 for t in
+                     self.torrent_session.torrents)
+            self.chart.add_point(dl, ul)
 
     def pause_selected(self):
-        current = self.torrent_list.currentItem()
-        if current:
-            if self.confirm_stop:
-                reply = QMessageBox.question(
-                    self, 'Pause',
-                    'Pause this download?',
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes
-                )
-                if reply == QMessageBox.StandardButton.No:
-                    return
+        c = self.tlist.currentItem()
+        if c:
+            r = self.tlist.row(c)
+            if r < len(self.active_torrents):
+                tid = self.active_torrents[r]['id']
+                self.torrent_session.pause_torrent(tid)
 
-            row = self.torrent_list.row(current)
-            if row < len(self.active_torrents):
-                tid = self.active_torrents[row]['id']
-                if tid in self.torrent_session.torrents:
-                    self.torrent_session.torrents[tid]['handle'].pause()
-
-    def resume_all(self):
-        for tid in self.torrent_session.torrents:
-            self.torrent_session.torrents[tid]['handle'].resume()
-
-    def pause_all(self):
-        for tid in self.torrent_session.torrents:
-            self.torrent_session.torrents[tid]['handle'].pause()
+    def resume_selected(self):
+        c = self.tlist.currentItem()
+        if c:
+            r = self.tlist.row(c)
+            if r < len(self.active_torrents):
+                tid = self.active_torrents[r]['id']
+                self.torrent_session.resume_torrent(tid)
 
     def remove_selected(self):
-        current = self.torrent_list.currentItem()
-        if not current:
+        c = self.tlist.currentItem()
+        if not c:
             return
-
         if self.confirm_delete:
-            reply = QMessageBox.question(
-                self, 'Remove',
-                'Remove this torrent?\nYou can also delete downloaded files.',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.No:
+            r = QMessageBox.question(self, 'Remove', 'Remove this torrent?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+            if r == QMessageBox.StandardButton.No:
                 return
-
-            delete_files = QMessageBox.question(
-                self, 'Delete Files',
-                'Delete downloaded files as well?',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            should_delete = (delete_files == QMessageBox.StandardButton.Yes)
+            df = QMessageBox.question(self, 'Delete Files', 'Delete downloaded files?',
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+            sd = df == QMessageBox.StandardButton.Yes
         else:
-            should_delete = False
+            sd = False
 
-        row = self.torrent_list.row(current)
+        row = self.tlist.row(c)
         if row < len(self.active_torrents):
             tid = self.active_torrents[row]['id']
-            self.torrent_session.remove_torrent(tid, should_delete)
-            self.torrent_list.takeItem(row)
+            self.torrent_session.remove_torrent(tid, sd)
+            self.tlist.takeItem(row)
             if tid in self.torrent_widgets:
                 del self.torrent_widgets[tid]
             del self.active_torrents[row]
 
-    def show_settings(self):
-        dialog = SettingsDialog(self)
-        dialog.exec()
-
-    def show_device_manager(self):
-        dialog = DeviceManagerDialog(self)
-        dialog.exec()
-
-    def show_about(self):
-        QMessageBox.about(
-            self, "About Qform",
-            "Qform v1.0b\n\n"
-            "Advanced torrent client\n"
-            "Built with Python, libtorrent, PyQt6\n\n"
-            "Features:\n"
-            "- Resume downloads after restart\n"
-            "- Detailed download statistics\n"
-            "- Device manager for file transfers\n"
-            "- Automatic progress saving"
-        )
-
     def apply_theme(self, theme):
         themes = {
             "Dark Gray": """
-                QMainWindow { background-color: #2b2b2b; color: #e0e0e0; }
-                QPushButton { background-color: #3c3f41; color: #e0e0e0; border: 1px solid #555; padding: 5px 10px; border-radius: 3px; }
-                QPushButton:hover { background-color: #4c5052; }
-                QLineEdit { background-color: #3c3f41; color: #e0e0e0; border: 1px solid #555; padding: 5px; border-radius: 3px; }
-                QProgressBar { background-color: #3c3f41; border: 1px solid #555; border-radius: 3px; text-align: center; color: #e0e0e0; }
-                QProgressBar::chunk { background-color: #4caf50; border-radius: 3px; }
-                QLabel { color: #e0e0e0; }
-                QGroupBox { color: #e0e0e0; border: 1px solid #555; padding-top: 15px; margin-top: 10px; border-radius: 3px; }
-                QGroupBox::title { color: #4caf50; }
-                QListWidget { background-color: #313335; color: #e0e0e0; border: 1px solid #555; }
-                QListWidget::item:selected { background-color: #4caf50; }
-                QMenuBar { background-color: #3c3f41; color: #e0e0e0; border-bottom: 1px solid #555; }
-                QMenuBar::item:selected { background-color: #4c5052; }
-                QMenu { background-color: #3c3f41; color: #e0e0e0; border: 1px solid #555; }
-                QMenu::item:selected { background-color: #4caf50; }
-                QStatusBar { background-color: #3c3f41; color: #e0e0e0; border-top: 1px solid #555; }
-                QComboBox { background-color: #3c3f41; color: #e0e0e0; border: 1px solid #555; padding: 5px; }
-                QCheckBox { color: #e0e0e0; }
-                QSpinBox { background-color: #3c3f41; color: #e0e0e0; border: 1px solid #555; padding: 5px; }
+                QMainWindow{background:#2b2b2b;color:#e0e0e0}
+                QPushButton{background:#3c3f41;color:#e0e0e0;border:1px solid #555;padding:5px 10px;border-radius:3px}
+                QPushButton:hover{background:#4c5052}
+                QLineEdit{background:#3c3f41;color:#e0e0e0;border:1px solid #555;padding:5px;border-radius:3px}
+                QProgressBar{background:#3c3f41;border:1px solid #555;border-radius:3px;text-align:center;color:#e0e0e0}
+                QProgressBar::chunk{background:#4caf50;border-radius:3px}
+                QLabel{color:#e0e0e0}
+                QGroupBox{color:#e0e0e0;border:1px solid #555;padding-top:15px;margin-top:10px;border-radius:3px}
+                QGroupBox::title{color:#4caf50}
+                QListWidget{background:#313335;color:#e0e0e0;border:1px solid #555}
+                QListWidget::item:selected{background:#4caf50}
+                QMenuBar{background:#3c3f41;color:#e0e0e0;border-bottom:1px solid #555}
+                QMenuBar::item:selected{background:#4c5052}
+                QMenu{background:#3c3f41;color:#e0e0e0;border:1px solid #555}
+                QMenu::item:selected{background:#4caf50}
+                QStatusBar{background:#3c3f41;color:#e0e0e0;border-top:1px solid #555}
+                QTextEdit{background:#313335;color:#e0e0e0;border:1px solid #555}
+                QCheckBox{color:#e0e0e0}
+                QComboBox{background:#3c3f41;color:#e0e0e0;border:1px solid #555;padding:5px}
+                QSpinBox{background:#3c3f41;color:#e0e0e0;border:1px solid #555;padding:5px}
             """,
             "Dark": """
-                QMainWindow { background-color: #1a1a1a; color: #d0d0d0; }
-                QPushButton { background-color: #2d2d2d; color: #d0d0d0; border: 1px solid #404040; padding: 5px 10px; border-radius: 3px; }
-                QPushButton:hover { background-color: #3d3d3d; }
-                QLineEdit { background-color: #2d2d2d; color: #d0d0d0; border: 1px solid #404040; padding: 5px; border-radius: 3px; }
-                QProgressBar { background-color: #2d2d2d; border: 1px solid #404040; border-radius: 3px; text-align: center; color: #d0d0d0; }
-                QProgressBar::chunk { background-color: #0078d4; border-radius: 3px; }
-                QLabel { color: #d0d0d0; }
-                QGroupBox { color: #d0d0d0; border: 1px solid #404040; padding-top: 15px; margin-top: 10px; border-radius: 3px; }
-                QGroupBox::title { color: #0078d4; }
-                QListWidget { background-color: #252525; color: #d0d0d0; border: 1px solid #404040; }
-                QListWidget::item:selected { background-color: #0078d4; }
-                QMenuBar { background-color: #2d2d2d; color: #d0d0d0; border-bottom: 1px solid #404040; }
-                QMenuBar::item:selected { background-color: #3d3d3d; }
-                QMenu { background-color: #2d2d2d; color: #d0d0d0; border: 1px solid #404040; }
-                QMenu::item:selected { background-color: #0078d4; }
-                QStatusBar { background-color: #2d2d2d; color: #d0d0d0; border-top: 1px solid #404040; }
-                QComboBox { background-color: #2d2d2d; color: #d0d0d0; border: 1px solid #404040; padding: 5px; }
-                QCheckBox { color: #d0d0d0; }
-                QSpinBox { background-color: #2d2d2d; color: #d0d0d0; border: 1px solid #404040; padding: 5px; }
+                QMainWindow{background:#1a1a1a;color:#d0d0d0}
+                QPushButton{background:#2d2d2d;color:#d0d0d0;border:1px solid #404040;padding:5px 10px;border-radius:3px}
+                QPushButton:hover{background:#3d3d3d}
+                QLineEdit{background:#2d2d2d;color:#d0d0d0;border:1px solid #404040;padding:5px;border-radius:3px}
+                QProgressBar{background:#2d2d2d;border:1px solid #404040;border-radius:3px;text-align:center;color:#d0d0d0}
+                QProgressBar::chunk{background:#0078d4;border-radius:3px}
+                QLabel{color:#d0d0d0}
+                QGroupBox{color:#d0d0d0;border:1px solid #404040;padding-top:15px;margin-top:10px;border-radius:3px}
+                QGroupBox::title{color:#0078d4}
+                QListWidget{background:#252525;color:#d0d0d0;border:1px solid #404040}
+                QListWidget::item:selected{background:#0078d4}
+                QMenuBar{background:#2d2d2d;color:#d0d0d0;border-bottom:1px solid #404040}
+                QMenuBar::item:selected{background:#3d3d3d}
+                QMenu{background:#2d2d2d;color:#d0d0d0;border:1px solid #404040}
+                QMenu::item:selected{background:#0078d4}
+                QStatusBar{background:#2d2d2d;color:#d0d0d0;border-top:1px solid #404040}
+                QTextEdit{background:#252525;color:#d0d0d0;border:1px solid #404040}
+                QCheckBox{color:#d0d0d0}
+                QComboBox{background:#2d2d2d;color:#d0d0d0;border:1px solid #404040;padding:5px}
+                QSpinBox{background:#2d2d2d;color:#d0d0d0;border:1px solid #404040;padding:5px}
             """
         }
-
         if theme in themes:
             self.setStyleSheet(themes[theme])
             self.current_theme = theme
 
     def apply_language(self, lang):
-        translations = {
-            "English": {
-                "window_title": "Qform",
-                "add_group": "Add Torrent",
-                "browse": "Browse",
-                "add_torrent": "Add Torrent",
-                "torrents_group": "Torrents",
-                "resume": "Resume",
-                "pause": "Pause",
-                "remove": "Remove",
-                "file_menu": "File",
-                "tools_menu": "Tools",
-                "help_menu": "Help"
-            },
-            "Russian": {
-                "window_title": "Qform",
-                "add_group": "Добавить торрент",
-                "browse": "Обзор",
-                "add_torrent": "Добавить",
-                "torrents_group": "Торренты",
-                "resume": "Продолжить",
-                "pause": "Пауза",
-                "remove": "Удалить",
-                "file_menu": "Файл",
-                "tools_menu": "Инструменты",
-                "help_menu": "Помощь"
-            }
+        t = {
+            "English": {"title": "Qform", "resume": "Resume", "pause": "Pause", "remove": "Remove",
+                        "file": "File", "tools": "Tools", "help": "Help"},
+            "Russian": {"title": "Qform", "resume": "Prodolzhit", "pause": "Pauza", "remove": "Udalit",
+                        "file": "Fail", "tools": "Instrumenty", "help": "Pomoshch"}
         }
-
-        if lang in translations:
-            t = translations[lang]
-            self.setWindowTitle(t["window_title"])
-            self.resume_btn.setText(t["resume"])
-            self.pause_btn.setText(t["pause"])
-            self.remove_btn.setText(t["remove"])
-
-            menubar = self.menuBar()
-            if menubar.actions():
-                menubar.actions()[0].setText(t["file_menu"])
-                menubar.actions()[1].setText(t["tools_menu"])
-                menubar.actions()[2].setText(t["help_menu"])
+        if lang in t:
+            self.setWindowTitle(t[lang]["title"])
+            self.rbtn.setText(t[lang]["resume"])
+            self.pbtn.setText(t[lang]["pause"])
+            self.dbtn.setText(t[lang]["remove"])
+            mb = self.menuBar()
+            if mb.actions():
+                mb.actions()[0].setText(t[lang]["file"])
+                mb.actions()[1].setText(t[lang]["tools"])
+                mb.actions()[2].setText(t[lang]["help"])
+        self.current_language = lang
 
     def save_settings(self):
-        settings = {
+        s = {
             'theme': self.current_theme,
             'language': self.current_language,
             'confirm_delete': self.confirm_delete,
             'confirm_stop': self.confirm_stop,
             'confirm_exit': self.confirm_exit
         }
-
-        settings_path = os.path.join(os.environ['APPDATA'], 'Qform', 'settings', 'default.json')
-        with open(settings_path, 'w') as f:
-            json.dump(settings, f, indent=4)
+        p = os.path.join(os.environ['APPDATA'], 'Qform', 'settings', 'default.json')
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w') as f:
+            json.dump(s, f, indent=4)
 
     def load_settings(self):
-        settings_path = os.path.join(os.environ['APPDATA'], 'Qform', 'settings', 'default.json')
-        if os.path.exists(settings_path):
+        p = os.path.join(os.environ['APPDATA'], 'Qform', 'settings', 'default.json')
+        if os.path.exists(p):
             try:
-                with open(settings_path, 'r') as f:
-                    settings = json.load(f)
-                    self.current_theme = settings.get('theme', 'Dark Gray')
-                    self.current_language = settings.get('language', 'English')
-                    self.confirm_delete = settings.get('confirm_delete', True)
-                    self.confirm_stop = settings.get('confirm_stop', True)
-                    self.confirm_exit = settings.get('confirm_exit', True)
+                with open(p) as f:
+                    s = json.load(f)
+                    self.current_theme = s.get('theme', 'Dark Gray')
+                    self.current_language = s.get('language', 'English')
+                    self.confirm_delete = s.get('confirm_delete', True)
+                    self.confirm_stop = s.get('confirm_stop', True)
+                    self.confirm_exit = s.get('confirm_exit', True)
             except:
                 pass
 
-    def closeEvent(self, event):
+    def closeEvent(self, e):
         if self.confirm_exit:
-            reply = QMessageBox.question(
-                self, 'Exit Qform',
-                'Exit and save all downloads?\nProgress will be saved automatically.',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
-            )
-            if reply == QMessageBox.StandardButton.No:
-                event.ignore()
+            r = QMessageBox.question(self, 'Exit', 'Save and exit?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.Yes)
+            if r == QMessageBox.StandardButton.No:
+                e.ignore()
                 return
-
         if self.torrent_session:
             self.torrent_session.save_all_progress()
             self.torrent_session.stop()
             self.torrent_session.wait()
-
-        event.accept()
+        e.accept()
 
 
 def main():
     app = QApplication(sys.argv)
     app.setOrganizationName("Qform")
     app.setApplicationName("Qform")
-    app.setApplicationVersion("1.0b")
+    app.setApplicationVersion("1.2")
 
     app_data = os.path.join(os.environ['APPDATA'], 'Qform')
-    if not os.path.exists(app_data):
-        QMessageBox.information(
-            None, "Qform Setup",
-            "Welcome to Qform!\n\n"
-            "Qform will now configure itself for first use.\n"
-            "Your downloads and settings will be saved automatically."
-        )
-        Installer.install()
+    os.makedirs(app_data, exist_ok=True)
+    for d in ['torrents', 'resume', 'settings', 'trackers']:
+        os.makedirs(os.path.join(app_data, d), exist_ok=True)
 
     window = QformMain()
     window.show()
