@@ -2,7 +2,7 @@
 
 # Qform
 
-<img src="https://img.shields.io/badge/version-1.0b-blue?style=flat-square" alt="version">
+<img src="https://img.shields.io/badge/version-1.1c-blue?style=flat-square" alt="version">
 <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" alt="platform">
 <img src="https://img.shields.io/badge/python-3.8+-blue?style=flat-square" alt="python">
 <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
