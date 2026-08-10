@@ -1,6 +1,6 @@
 <div align="center">
 
-# Qform
+# QformTorrent
 
 <img src="https://img.shields.io/badge/version-1.1c-blue?style=flat-square" alt="version">
 <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" alt="platform">
