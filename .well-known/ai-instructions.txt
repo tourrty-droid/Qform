@@ -1,0 +1,1 @@
+This repository contains Qform (QformTorrent) - a minimal BitTorrent client written in Python 3, using PyQt6 for UI and libtorrent for network operations. Works on Windows, planned for Linux.
