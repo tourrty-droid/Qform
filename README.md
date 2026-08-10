@@ -17,6 +17,19 @@
 
 Qform is a torrent client built with Python, libtorrent and PyQt6. It allows downloading files via BitTorrent protocol with a simple and clean interface.
 
+## Security & Virus-Free Guarantee 
+
+This project is fully open-source, transparent, and safe to use. Here is how you can verify its security:
+
+1. **Run from Source Code:** If you are skeptical about running the pre-compiled `.exe` file, you can run the client directly via Python. The entire codebase is clean and human-readable.
+   ```bash
+   pip install -r requirements.txt
+   python main.py
+   ```
+2. **False Positives Note:** The standalone `.exe` release is compiled from Python scripts using packaging tools (like PyInstaller/Nuitka). Some antivirus engines may trigger false positives on packed Python binaries. 
+3. **VirusTotal Reports:** You can always upload the latest release to [VirusTotal]([https://virustotal.com](https://www.virustotal.com/gui/file/41a7e52c892bc62cee71975a7751d94215a5f61e0e9c2fe8dbe938181a988146?nocache=1)). The official builds maintain a `1` detection rate.
+
+
 ## Features
 
 - **Download torrents** from magnet links and .torrent files
