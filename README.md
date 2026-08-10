@@ -44,14 +44,7 @@ The application periodically saves torrent state every 5 seconds, ensuring no da
 
 ## Installation
 
-### Option 1: Run from source (not work yet)
-```bash
-git clone https://github.com/tourrty-droid/qform.git
-cd qform
-pip install -r requirements.txt
-python main.py
-```
-## Option 2: Download release (USE THISSS!!1)
+## Option 2: Download release
 Download the latest `Qform.exe` from [Releases](https://github.com/tourrty-droid/qform/releases) and run it.
 
 ## Requirements
@@ -65,7 +58,7 @@ qform/
 ```
 ## Usage
 
-1. Launch `Qform.exe` or `python main.py`
+1. Launch `Qformtorrent.exe`
 2. Paste **magnet link** or select **.torrent file**
 3. Choose download directory
 4. Click **Add Torrent**
